@@ -59,6 +59,8 @@ def detect_model_type(cfg, config, output_dir=None):
         return 'gemma'
     elif 'lfm2' in model_type_str:
         return 'lfm2'
+    elif 'qwen3_moe' in model_type_str:
+        return 'qwen3_moe'
     elif 'qwen' in model_type_str:
         return 'qwen'
     elif 'moonshine' in model_type_str:
@@ -93,8 +95,10 @@ def extract_base_config(cfg, config):
         'layer_norm_eps': cfg_get(cfg, 'layer_norm_eps', cfg_get(cfg, 'layer_norm_epsilon', cfg_get(cfg, 'rms_norm_eps', 1e-6))),
         'num_experts': cfg_get(cfg, 'num_experts', 0),
         'num_shared_experts': cfg_get(cfg, 'num_shared_experts', 0),
-        'num_top_experts': cfg_get(cfg, 'moe_top_k', cfg_get(cfg, 'num_top_experts', 0)),
+        'num_top_experts': cfg_get(cfg, 'moe_top_k', cfg_get(cfg, 'num_experts_per_tok', cfg_get(cfg, 'num_top_experts', 0))),
         'moe_every_n_layers': cfg_get(cfg, 'moe_every_n_layers', 0),
+        'moe_intermediate_size': cfg_get(cfg, 'moe_intermediate_size', cfg_get(cfg, 'expert_intermediate_size', 0)),
+        'norm_topk_prob': cfg_get(cfg, 'norm_topk_prob', False),
     }
 
 

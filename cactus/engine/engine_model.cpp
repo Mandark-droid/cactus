@@ -411,10 +411,10 @@ bool Config::from_json(const std::string& config_path) {
         std::string key = line.substr(0, eq_pos);
         std::string value = line.substr(eq_pos + 1);
         
-        key.erase(0, key.find_first_not_of(" \t"));
-        key.erase(key.find_last_not_of(" \t") + 1);
-        value.erase(0, value.find_first_not_of(" \t"));
-        value.erase(value.find_last_not_of(" \t") + 1);
+        key.erase(0, key.find_first_not_of(" \t\r\n"));
+        key.erase(key.find_last_not_of(" \t\r\n") + 1);
+        value.erase(0, value.find_first_not_of(" \t\r\n"));
+        value.erase(value.find_last_not_of(" \t\r\n") + 1);
         
         if (key == "vocab_size") vocab_size = static_cast<uint32_t>(std::stoul(value));
         else if (key == "bos_token_id") bos_token_id = static_cast<uint32_t>(std::stoul(value));
@@ -431,6 +431,8 @@ bool Config::from_json(const std::string& config_path) {
         else if (key == "num_shared_experts") num_shared_experts = static_cast<uint32_t>(std::stoul(value));
         else if (key == "num_top_experts") num_top_experts = static_cast<uint32_t>(std::stoul(value));
         else if (key == "moe_every_n_layers") moe_every_n_layers = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "moe_intermediate_size") moe_intermediate_size = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "norm_topk_prob") norm_topk_prob = (value == "true" || value == "True" || value == "1");
         else if (key == "tie_word_embeddings") tie_word_embeddings = (value == "true" || value == "1");
         else if (key == "vision_hidden_dim") vision_hidden_dim = static_cast<uint32_t>(std::stoul(value));
         else if (key == "vision_num_layers") vision_num_layers = static_cast<uint32_t>(std::stoul(value));
@@ -471,6 +473,7 @@ bool Config::from_json(const std::string& config_path) {
             else if (value == "whisper" || value == "WHISPER") model_type = ModelType::WHISPER;
             else if (value == "moonshine" || value == "MOONSHINE") model_type = ModelType::MOONSHINE;
             else if (value == "silero_vad" || value == "SILERO_VAD") model_type = ModelType::SILERO_VAD;
+            else if (value == "qwen3_moe" || value == "QWEN_MOE") model_type = ModelType::QWEN_MOE;
             else model_type = ModelType::QWEN;
         }
         else if (key == "model_variant") {
@@ -524,6 +527,10 @@ bool Config::from_json(const std::string& config_path) {
     } else if (model_type == ModelType::QWEN) {
         default_temperature = 0.7f;
         default_top_p = 0.8f;
+        default_top_k = 20;
+    } else if (model_type == ModelType::QWEN_MOE) {
+        default_temperature = 0.6f;
+        default_top_p = 0.95f;
         default_top_k = 20;
     } else if (model_type == ModelType::WHISPER) {
         default_temperature = 0.0f;
@@ -581,6 +588,8 @@ std::unique_ptr<Model> create_model(const std::string& model_folder) {
             return std::make_unique<MoonshineModel>(config);
         case Config::ModelType::SILERO_VAD:
             return std::make_unique<SileroVADModel>(config);
+        case Config::ModelType::QWEN_MOE:
+            return std::make_unique<Qwen3MoeModel>(config);
         default:
             return std::make_unique<QwenModel>(config);
     }

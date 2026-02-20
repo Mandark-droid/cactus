@@ -310,6 +310,63 @@ def convert_hf_model_weights(model, output_dir, precision='INT8', args=None):
                         saved_tensor_full_names.add(attn_name)
                         found = True
 
+        # Qwen3 MoE: save per-expert weights (once per layer)
+        if detected_model_type == 'qwen3_moe':
+            layer_prefix = next(iter(existing_prefixes))
+            num_experts = model_config.get('num_experts', 0)
+            moe_intermediate = model_config.get('moe_intermediate_size', 0)
+
+            # Try fused format first: experts.gate_up_proj [num_experts, 2*moe_intermediate, hidden]
+            fused_gate_up_key = f'{layer_prefix}mlp.experts.gate_up_proj'
+            fused_down_key = f'{layer_prefix}mlp.experts.down_proj'
+
+            if fused_gate_up_key in state_dict and fused_gate_up_key not in saved_tensor_full_names:
+                # Fused format: split into per-expert gate, up, down
+                gate_up_tensor = state_dict[fused_gate_up_key]  # [num_experts, 2*moe_intermediate, hidden]
+                down_tensor = state_dict[fused_down_key]        # [num_experts, hidden, moe_intermediate]
+                for e in range(num_experts):
+                    expert_gate_up = gate_up_tensor[e]  # [2*moe_intermediate, hidden]
+                    gate_proj = expert_gate_up[:moe_intermediate, :]   # [moe_intermediate, hidden]
+                    up_proj = expert_gate_up[moe_intermediate:, :]     # [moe_intermediate, hidden]
+                    down_proj = down_tensor[e]                         # [hidden, moe_intermediate]
+                    save_tensor_with_header(gate_proj, output_dir / f'layer_{i}_expert_{e}_ffn_gate.weights', precision, transpose=False, stats_tracker=quantization_stats, args=args, model_type=detected_model_type)
+                    save_tensor_with_header(up_proj, output_dir / f'layer_{i}_expert_{e}_ffn_up.weights', precision, transpose=False, stats_tracker=quantization_stats, args=args, model_type=detected_model_type)
+                    save_tensor_with_header(down_proj, output_dir / f'layer_{i}_expert_{e}_ffn_down.weights', precision, transpose=False, stats_tracker=quantization_stats, args=args, model_type=detected_model_type)
+                saved_tensor_full_names.add(fused_gate_up_key)
+                saved_tensor_full_names.add(fused_down_key)
+            else:
+                # Per-expert format: experts.{e}.gate_proj.weight
+                for e in range(num_experts):
+                    expert_weights = {
+                        'gate_proj': f'layer_{i}_expert_{e}_ffn_gate.weights',
+                        'up_proj': f'layer_{i}_expert_{e}_ffn_up.weights',
+                        'down_proj': f'layer_{i}_expert_{e}_ffn_down.weights',
+                    }
+                    for proj_name, out_file in expert_weights.items():
+                        expert_key = f'{layer_prefix}mlp.experts.{e}.{proj_name}.weight'
+                        if expert_key in state_dict and expert_key not in saved_tensor_full_names:
+                            save_tensor_with_header(state_dict[expert_key], output_dir / out_file, precision, transpose=False, stats_tracker=quantization_stats, args=args, model_type=detected_model_type)
+                            saved_tensor_full_names.add(expert_key)
+
+            # Shared expert (if present)
+            num_shared = model_config.get('num_shared_experts', 0)
+            if num_shared > 0:
+                shared_weights = {
+                    'gate_proj': f'layer_{i}_shared_expert_ffn_gate.weights',
+                    'up_proj': f'layer_{i}_shared_expert_ffn_up.weights',
+                    'down_proj': f'layer_{i}_shared_expert_ffn_down.weights',
+                }
+                for proj_name, out_file in shared_weights.items():
+                    shared_key = f'{layer_prefix}mlp.shared_expert.{proj_name}.weight'
+                    if shared_key in state_dict and shared_key not in saved_tensor_full_names:
+                        save_tensor_with_header(state_dict[shared_key], output_dir / out_file, precision, transpose=False, stats_tracker=quantization_stats, args=args, model_type=detected_model_type)
+                        saved_tensor_full_names.add(shared_key)
+                # Shared expert gate (if present)
+                shared_gate_key = f'{layer_prefix}mlp.shared_expert_gate.weight'
+                if shared_gate_key in state_dict and shared_gate_key not in saved_tensor_full_names:
+                    save_tensor_with_header(state_dict[shared_gate_key], output_dir / f'layer_{i}_shared_expert_gate.weights', precision, transpose=False, stats_tracker=quantization_stats, args=args, model_type=detected_model_type)
+                    saved_tensor_full_names.add(shared_gate_key)
+
     if saved_tensor_full_names != set(state_dict.keys()):
         print(f"Warning: Unsaved tensors: {set(state_dict.keys()) - saved_tensor_full_names}")
 
