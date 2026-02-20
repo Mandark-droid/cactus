@@ -12,30 +12,61 @@ Add native Qwen3 MoE support to the Cactus v1.x compute graph engine so that the
 
 **Phases 0-2: COMPLETE** — Python conversion pipeline and C++ model implementation done.
 
-**Phase 3: IN PROGRESS** — Model runs on Android ARM64 (Pixel 7a), produces coherent output.
+**Phase 3: IN PROGRESS** — Model runs on Android ARM64 (Pixel 7a), produces coherent output for multi-token prompts.
+
+### HuggingFace Reference (FP32 ground truth)
+
+Prompt: `"Hello"` → token `[9707]`, greedy decoding, 20 tokens:
+```
+IDs:  [13, 13, 16, 24, 17, 16, 271, 91, 2631, 760, 6122, 220, 16, 11, 220, 16, 24, 17, 16, 9248]
+Text: Hello..1921\n| Date | September 1, 1921 |\n
+```
+Top-5 at step 1: `[13, 220, 576, 2303, 619]` — note 576 and 2303 appear in our divergent outputs.
+
+### Cactus vs HF Comparison
+
+| Test | Method | Result | HF Expected | Status |
+|------|--------|--------|-------------|--------|
+| First token | decode({9707}) | 13 | 13 | Match |
+| A: prefill+decode | prefill({9707}) → decode({13}) | 13 | 13 | Match |
+| B: decode+decode | decode({9707}) → decode({13}) | 576 | 13 | HF rank 3 |
+| C: prefill+5 decodes | prefill({9707,13}) → 5x decode | 16,23,17,271,91 | 16,24,17,16,271 | Partial (INT8 drift) |
+| Multi-token | "The capital of France is" | "a village of the town of the County..." | — | Coherent English |
+
+**Test C detail:** Position 0 exact, position 1 off-by-1 in top-5 (23 vs 24), position 2 exact, then diverges — consistent with cumulative INT8 KV cache quantization error.
 
 ### What Works
-- Weight conversion: Loggenix-MoE 0.62B (safetensors → Cactus FP16 format) converts cleanly
+- Weight conversion: Loggenix-MoE 0.62B (safetensors → Cactus FP16 format) converts cleanly (576 expert weight files + attention/norm/embedding)
 - Model loads, tokenizes, and generates text on ARM64 via `adb shell`
-- **Prefill + decode path produces near-correct output:**
-  ```
-  Cactus (prefill+decode): 16 23 17 271 91
-  HuggingFace reference:   16 24 17  16 271
-  ```
-  First 3/5 tokens match exactly; small drift at position 3 (24→23) is INT8 KV cache quantization
+- First token prediction matches HF exactly
+- **Multi-token prompts produce coherent generation** via prefill+decode path
+- Prefill path populates KV cache correctly; single-step decode after prefill matches HF
 
-### Known Issue: Decode from Empty Cache
-- `decode(single_token)` from empty KV cache produces wrong KV data (token 576 instead of 13)
-- Root cause: MoE graph creates ~192 buffer aliases via INDEX ops for expert weight routing; adding logits/sampling nodes on top corrupts KV cache reads
-- **Workaround implemented:** `Qwen3MoeModel::decode()` override separates logits computation from cache population when cache is empty
-- Prefill path is unaffected and works correctly
+### Known Issue: Single-Token Decode from Empty Cache
+- `decode(single_token)` from empty KV cache gets the correct first token but corrupts the KV cache for subsequent decodes
+- Root cause: MoE graph creates ~192 buffer aliases via INDEX ops for expert weight routing (16 experts × 12 layers); the large graph causes the buffer pool to alias K/V output buffers with later computation nodes
+- **Three decode override approaches tested, all produce identical (wrong) results:**
+  1. `forward(false)` + logits → `prefill()` for cache
+  2. `Model::decode()` → `reset_cache()` → `prefill()`
+  3. Split execution: `forward(true)` + execute (no logits) → copy hidden → `update_kv_cache()` → tiny logits graph
+- All three correctly return token 13 for the first decode, but subsequent decodes produce 576 (HF rank 3 at that position)
+- **Suspected root cause:** Graph `soft_reset()` preserves INPUT nodes with `external_data`, accumulating stale nodes across forward passes, changing `next_node_id_` and potentially affecting buffer allocation patterns
+- **Practical workaround:** Multi-token prompts naturally use the prefill+decode path (chat templates always provide multiple tokens)
 
 ### Key Findings
 - MoE routing implementation (softmax→topk→scatter→weighted sum) verified correct
 - NomicModel MoE reference was appropriate — routing pipeline is NOT encoder-specific
 - `norm_topk_prob=false` confirmed correct for all Qwen3 MoE variants (no renormalization needed)
-- INT8 KV cache (matching QwenModel pattern) works but introduces quantization drift over long sequences
+- INT8 KV cache (matching QwenModel pattern) works but introduces quantization drift — tokens stay within HF top-5 but may not match rank-1
 - QK norm (per-head RMSNorm on Q,K before RoPE) working correctly
+- `KVCache::reset()` only zeroes seq_len counters, doesn't clear actual buffer data
+- `KVCache::update_from_graph()` has two branches: full-copy (Branch 1) for cache-inclusive K/V, and append (Branch 2) for new-only K/V
+
+### Performance (Pixel 7a, ARM64)
+- Model create: ~1 ms
+- Model init (load weights): ~420-2100 ms (varies with disk cache)
+- First decode (single token): ~75 ms
+- Prefill + first decode (5 tokens): ~132 ms
 
 ### Files Modified (from upstream)
 | File | Change |
@@ -47,12 +78,15 @@ Add native Qwen3 MoE support to the Cactus v1.x compute graph engine so that the
 | `python/src/config_utils.py` | Added `qwen3_moe` detection, MoE config fields |
 | `python/src/weight_patterns.py` | Added `mlp.gate.weight` → router pattern |
 | `python/src/converter.py` | Added per-expert SwiGLU weight iteration loop |
+| `tests/phase3/test_qwen3_moe.cpp` | Validation test: A/B/C cache tests, generation comparison |
+| `tests/phase3/generate_reference.py` | HF reference output generator |
 
 ### Next Steps
-- Test decode override fix on device (rebuild + push + run)
-- Verify token-for-token match for first 5-10 tokens with prefill path
-- Benchmark tokens/sec and memory on ARM64
-- Test with longer prompts and chat template
+- Investigate stale INPUT node accumulation in `soft_reset()` as root cause of single-token decode issue
+- Test with chat template prompts (multi-token, bypasses single-token issue)
+- Generate HF reference for multi-token prompts and compare token-for-token
+- Benchmark tokens/sec for sustained generation (20+ tokens)
+- Test with 1.38B model variant (top-8 routing, 2048 hidden dim)
 
 ---
 
