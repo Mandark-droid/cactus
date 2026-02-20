@@ -217,7 +217,8 @@ uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temper
             return Model::decode({tokens.back()}, temperature, top_p, top_k, profile_file, out_entropy);
         }
 
-        // Single token from empty cache: compute logits separately from cache
+        // Single token from empty cache: split into two phases to avoid
+        // buffer aliasing between MoE routing and logits computation.
         if (temperature < 0) temperature = config_.default_temperature;
         if (top_p < 0) top_p = config_.default_top_p;
         if (top_k == 0) top_k = config_.default_top_k;
@@ -227,24 +228,40 @@ uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temper
             ? ComputeBackend::CPU
             : ComputeBackend::NPU;
 
-        // Phase 1: Forward WITHOUT cache for clean hidden states
-        auto final_hidden = forward(tokens, false);
-
-        // Add logits computation (same as base class decode)
-        auto last_hidden = gb->index(final_hidden, 0, 0);
-        size_t hidden_dim = gb->get_output_buffer(last_hidden).shape[0];
-        last_hidden = gb->reshape(last_hidden, {1, hidden_dim});
-        auto logits_node_id = gb->matmul(last_hidden, output_weight_node_id_, true, backend);
-        auto sampled_token_id = gb->sample(logits_node_id, temperature, top_p, top_k,
-                                           tool_constrainer_.get_bias());
+        // Phase 1: Forward with cache but WITHOUT logits nodes → clean K/V
+        auto final_hidden = forward(tokens, true);
         gb->execute(profile_file);
 
-        // Extract results before prefill destroys graph state
-        uint32_t result_token = *static_cast<uint32_t*>(gb->get_output(sampled_token_id));
+        // Copy last token's output-normalized hidden state before soft_reset
+        const auto& hidden_buf = gb->get_output_buffer(final_hidden);
+        size_t hidden_dim = hidden_buf.shape.back();
+        std::vector<float> last_hidden_fp32(hidden_dim);
+        void* hidden_ptr = gb->get_output(final_hidden);
+        if (hidden_buf.precision == Precision::FP32) {
+            std::memcpy(last_hidden_fp32.data(), hidden_ptr, hidden_dim * sizeof(float));
+        } else {
+            __fp16* src = static_cast<__fp16*>(hidden_ptr);
+            Quantization::fp16_to_fp32(src, last_hidden_fp32.data(), hidden_dim);
+        }
+
+        // Update KV cache from clean graph (no logits nodes = no buffer aliasing)
+        post_execute_updates(gb, tokens.size());
+        update_kv_cache(gb, tokens.size());
+
+        // Phase 2: Tiny logits-only graph from saved hidden state
+        gb->soft_reset();
+        auto input_node = gb->input({1, hidden_dim}, Precision::FP32);
+        auto logits_node = gb->matmul(input_node, output_weight_node_id_, true, backend);
+        auto sample_node = gb->sample(logits_node, temperature, top_p, top_k,
+                                      tool_constrainer_.get_bias());
+        gb->set_input(input_node, last_hidden_fp32.data(), Precision::FP32);
+        gb->execute(profile_file);
+
+        uint32_t result_token = *static_cast<uint32_t*>(gb->get_output(sample_node));
 
         if (out_entropy) {
-            const auto& logits_buf = gb->get_output_buffer(logits_node_id);
-            void* logits_ptr = gb->get_output(logits_node_id);
+            const auto& logits_buf = gb->get_output_buffer(logits_node);
+            void* logits_ptr = gb->get_output(logits_node);
             size_t vocab_size = logits_buf.shape.back();
 
             std::vector<float> logits(vocab_size);
@@ -271,12 +288,8 @@ uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temper
                 double prob = std::exp(log_prob);
                 if (prob > 1e-10) entropy -= prob * log_prob;
             }
-
             *out_entropy = static_cast<float>(entropy / std::log(static_cast<double>(vocab_size)));
         }
-
-        // Phase 2: Populate KV cache via prefill (the correct path for MoE)
-        Model::prefill(tokens, tokens.size(), profile_file);
 
         return result_token;
     }
