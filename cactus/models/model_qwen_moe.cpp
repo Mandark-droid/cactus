@@ -121,8 +121,10 @@ size_t Qwen3MoeModel::build_mlp(CactusGraph* gb, size_t normalized_h, uint32_t l
     const size_t seq_len = gb->get_output_buffer(normalized_h).shape[0];
 
     auto router_logits = gb->matmul(normalized_h, layer.moe_router_weight, true, backend);
-    auto router_probs = gb->softmax(router_logits);
 
+    // HF Qwen3MoeSparseMoeBlock: softmax(all_logits) -> topk -> route
+    // This matches the HF reference outputs used for validation.
+    auto router_probs = gb->softmax(router_logits);
     auto topk_result = gb->topk(router_probs, config_.num_top_experts);
     auto topk_idx = gb->index(topk_result, 0, 0);
     auto topk_weights = gb->index(topk_result, 1, 0);
@@ -205,56 +207,35 @@ size_t Qwen3MoeModel::forward(const std::vector<uint32_t>& tokens, bool use_cach
 
 uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temperature, float top_p,
                                 size_t top_k, const std::string& profile_file, float* out_entropy) {
-    // When KV cache is empty, the MoE model's large computation graph creates many
-    // buffer aliases via INDEX operations for expert weight routing (16 experts × 12
-    // layers). Adding logits/sampling nodes on top during base class decode() causes
-    // KV cache corruption. Work around by separating logits from cache population.
     if (kv_cache_.is_empty() && !tokens.empty()) {
         if (tokens.size() > 1) {
-            // Multi-token: prefill all but last token, then decode last normally
             std::vector<uint32_t> prefix(tokens.begin(), tokens.end() - 1);
             Model::prefill(prefix, prefix.size(), profile_file);
             return Model::decode({tokens.back()}, temperature, top_p, top_k, profile_file, out_entropy);
         }
 
-        // Single token from empty cache: split into two phases to avoid
-        // buffer aliasing between MoE routing and logits computation.
+        // Single token from empty cache: Model::decode corrupts KV cache state
+        // in a way that subsequent decodes produce wrong results. Work around
+        // by using prefill for cache population (known correct), then computing
+        // logits via a separate forward(false) pass that doesn't touch the cache.
         if (temperature < 0) temperature = config_.default_temperature;
         if (top_p < 0) top_p = config_.default_top_p;
         if (top_k == 0) top_k = config_.default_top_k;
+
+        Model::prefill(tokens, tokens.size(), profile_file);
 
         auto* gb = static_cast<CactusGraph*>(graph_handle_);
         auto backend = config_.default_backend == Config::Backend::CPU
             ? ComputeBackend::CPU
             : ComputeBackend::NPU;
 
-        // Phase 1: Forward with cache but WITHOUT logits nodes → clean K/V
-        auto final_hidden = forward(tokens, true);
-        gb->execute(profile_file);
-
-        // Copy last token's output-normalized hidden state before soft_reset
-        const auto& hidden_buf = gb->get_output_buffer(final_hidden);
-        size_t hidden_dim = hidden_buf.shape.back();
-        std::vector<float> last_hidden_fp32(hidden_dim);
-        void* hidden_ptr = gb->get_output(final_hidden);
-        if (hidden_buf.precision == Precision::FP32) {
-            std::memcpy(last_hidden_fp32.data(), hidden_ptr, hidden_dim * sizeof(float));
-        } else {
-            __fp16* src = static_cast<__fp16*>(hidden_ptr);
-            Quantization::fp16_to_fp32(src, last_hidden_fp32.data(), hidden_dim);
-        }
-
-        // Update KV cache from clean graph (no logits nodes = no buffer aliasing)
-        post_execute_updates(gb, tokens.size());
-        update_kv_cache(gb, tokens.size());
-
-        // Phase 2: Tiny logits-only graph from saved hidden state
-        gb->soft_reset();
-        auto input_node = gb->input({1, hidden_dim}, Precision::FP32);
-        auto logits_node = gb->matmul(input_node, output_weight_node_id_, true, backend);
+        auto final_hidden = forward(tokens, false);
+        auto last_hidden = gb->index(final_hidden, tokens.size() - 1, 0);
+        size_t hidden_dim = gb->get_output_buffer(last_hidden).shape[0];
+        last_hidden = gb->reshape(last_hidden, {1, hidden_dim});
+        auto logits_node = gb->matmul(last_hidden, output_weight_node_id_, true, backend);
         auto sample_node = gb->sample(logits_node, temperature, top_p, top_k,
                                       tool_constrainer_.get_bias());
-        gb->set_input(input_node, last_hidden_fp32.data(), Precision::FP32);
         gb->execute(profile_file);
 
         uint32_t result_token = *static_cast<uint32_t*>(gb->get_output(sample_node));
@@ -266,14 +247,12 @@ uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temper
 
             std::vector<float> logits(vocab_size);
             if (logits_buf.precision == Precision::FP32) {
-                float* src = static_cast<float*>(logits_ptr);
-                std::copy(src, src + vocab_size, logits.begin());
+                std::copy(static_cast<float*>(logits_ptr),
+                         static_cast<float*>(logits_ptr) + vocab_size, logits.begin());
             } else if (logits_buf.precision == Precision::FP16) {
-                __fp16* src = static_cast<__fp16*>(logits_ptr);
-                Quantization::fp16_to_fp32(src, logits.data(), vocab_size);
+                Quantization::fp16_to_fp32(static_cast<__fp16*>(logits_ptr), logits.data(), vocab_size);
             } else {
-                int8_t* src = static_cast<int8_t*>(logits_ptr);
-                Quantization::int8_to_fp32(src, logits.data(), vocab_size, 1.0f);
+                Quantization::int8_to_fp32(static_cast<int8_t*>(logits_ptr), logits.data(), vocab_size, 1.0f);
             }
 
             float max_logit = *std::max_element(logits.begin(), logits.end());
@@ -294,7 +273,6 @@ uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temper
         return result_token;
     }
 
-    // Cache already populated: base class decode works correctly
     return Model::decode(tokens, temperature, top_p, top_k, profile_file, out_entropy);
 }
 

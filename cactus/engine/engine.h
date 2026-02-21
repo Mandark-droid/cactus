@@ -521,6 +521,10 @@ public:
 
     virtual void reset_cache() { kv_cache_.reset(); }
 
+    size_t get_cache_seq_len() const { return kv_cache_.current_seq_len; }
+    size_t get_cache_total_len() const { return kv_cache_.total_seq_len; }
+    bool is_cache_empty() const { return kv_cache_.is_empty(); }
+
     double score_tokens_window_logprob(const std::vector<uint32_t>& tokens, size_t start, size_t end, size_t context, size_t* tokens_scored);
 
 
