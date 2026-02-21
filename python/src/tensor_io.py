@@ -140,7 +140,7 @@ def save_tensor_with_header(tensor, output_path, precision='INT8', transpose=Fal
 
     if precision in ('INT8', 'INT4'):
         filename = output_path.name
-        if any(x in filename for x in ['norm', 'bias', 'vision', 'position_embeddings', 'embed_positions']):
+        if any(x in filename for x in ['norm', 'bias', 'vision', 'position_embeddings', 'embed_positions', 'moe_router']):
             precision = 'FP16'
 
     shape = list(data.shape)

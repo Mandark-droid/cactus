@@ -284,15 +284,19 @@ int main(int argc, char* argv[]) {
     std::cout << "  Forward pass: " << std::fixed << std::setprecision(1) << decode_ms << " ms\n\n";
 
     // ========================================================
-    // Step 6: Extended generation
+    // Step 6: Extended generation with timing
     // ========================================================
-    std::cout << "[6/7] Generation (greedy, 20 tokens)...\n";
+    std::cout << "[6/7] Generation (greedy, 50 tokens)...\n";
     std::cout << prompt;
     std::cout << next_text;
 
     std::vector<uint32_t> generated = {next_token};
-    for (int i = 0; i < 19; i++) {
+    std::vector<double> decode_times;
+    for (int i = 0; i < 49; i++) {
+        auto td0 = std::chrono::steady_clock::now();
         uint32_t tok = model->decode({generated.back()}, 0.0f, 1.0f, 1);
+        auto td1 = std::chrono::steady_clock::now();
+        decode_times.push_back(std::chrono::duration<double, std::milli>(td1 - td0).count());
         generated.push_back(tok);
         std::cout << tokenizer->decode({tok});
         std::cout.flush();
@@ -301,11 +305,29 @@ int main(int argc, char* argv[]) {
     std::cout << "\n\n";
 
     std::cout << "Token IDs: [";
-    for (size_t i = 0; i < generated.size(); i++) {
+    for (size_t i = 0; i < std::min(generated.size(), (size_t)20); i++) {
         if (i > 0) std::cout << ", ";
         std::cout << generated[i];
     }
+    if (generated.size() > 20) std::cout << ", ...";
     std::cout << "]\n\n";
+
+    // Performance stats
+    if (!decode_times.empty()) {
+        double total_time = 0;
+        for (double t : decode_times) total_time += t;
+        double avg_time = total_time / decode_times.size();
+        double min_time = *std::min_element(decode_times.begin(), decode_times.end());
+        double max_time = *std::max_element(decode_times.begin(), decode_times.end());
+        double tokens_per_sec = 1000.0 * decode_times.size() / total_time;
+
+        std::cout << "[Performance]\n";
+        std::cout << "  Tokens generated: " << generated.size() << "\n";
+        std::cout << "  Decode times (ms): avg=" << std::fixed << std::setprecision(1) << avg_time
+                  << " min=" << min_time << " max=" << max_time << "\n";
+        std::cout << "  Throughput: " << std::fixed << std::setprecision(1) << tokens_per_sec << " tokens/sec\n";
+        std::cout << "  Total generation time: " << std::fixed << std::setprecision(0) << total_time << " ms\n\n";
+    }
 
     // ========================================================
     // Step 7: Summary
