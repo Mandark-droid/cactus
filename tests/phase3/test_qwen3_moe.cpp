@@ -36,14 +36,12 @@ int main(int argc, char* argv[]) {
     std::cout << "Model path: " << model_path << "\n";
     std::cout << "Prompt: \"" << prompt << "\"\n\n";
 
-    // Step 1: Smoke test — create, init, tokenize
-    std::unique_ptr<Model> model;
-    Tokenizer* tokenizer = nullptr;
+    // Step 1: Smoke test — create, init, tokenize, then DESTROY
     std::vector<uint32_t> tokens;
     {
         std::cout << "[1/7] Smoke test...\n";
         auto t0 = std::chrono::steady_clock::now();
-        model = create_model(model_path);
+        auto model = create_model(model_path);
         if (!model) {
             std::cerr << "FAILED: Could not create model from " << model_path << "\n";
             return 1;
@@ -67,7 +65,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  Initialized in " << std::fixed << std::setprecision(1)
                   << std::chrono::duration<double, std::milli>(t3 - t2).count() << " ms\n";
 
-        tokenizer = model->get_tokenizer();
+        auto* tokenizer = model->get_tokenizer();
         if (!tokenizer) {
             std::cerr << "FAILED: No tokenizer loaded\n";
             return 1;
@@ -78,15 +76,14 @@ int main(int argc, char* argv[]) {
             if (i > 0) std::cout << ", ";
             std::cout << tokens[i];
         }
-        std::cout << "]\n\n";
-    }
+        std::cout << "]\n";
+        std::cout << "  Destroying smoke test model before I-tests...\n\n";
+    }  // smoke test model destroyed here
 
     // ========================================================
     // Step 2: Isolated single-operation tests
     // Each test creates its own model instance (fresh state).
     // HF reference (softmax->topk routing): [9707] -> [13, 13, 16, 24, 17, 16, 271, 91, 2631, 760]
-    // NOTE: MoE routing was changed to topk->softmax (matching Python training code).
-    // Reference values may shift. First token (13) should be robust to routing change.
     // ========================================================
     std::cout << "[2/7] Isolated KV cache tests (each model is fresh)...\n";
     int total_pass = 0, total_tests = 0;
@@ -103,6 +100,18 @@ int main(int argc, char* argv[]) {
         bool pass = (tok == 13);
         total_tests++; if (pass) total_pass++;
         std::cout << "  I1 (prefill+decode): prefill[9707] decode[13]->" << tok
+                  << " (HF:13) " << (pass ? "PASS" : "FAIL") << "\n";
+    }
+
+    // I1b: immediate repeat of I1 — does one prior model break it?
+    {
+        auto m = create_model(model_path);
+        m->init(model_path, context_size, "", true);
+        m->prefill({9707}, 1);
+        uint32_t tok = m->decode({13}, 0.0f, 1.0f, 1);
+        bool pass = (tok == 13);
+        total_tests++; if (pass) total_pass++;
+        std::cout << "  I1b (immediate repeat): " << tok
                   << " (HF:13) " << (pass ? "PASS" : "FAIL") << "\n";
     }
 
@@ -209,8 +218,12 @@ int main(int argc, char* argv[]) {
     // ========================================================
     std::cout << "[4/7] Chat template test...\n";
     {
+        auto m = create_model(model_path);
+        m->init(model_path, context_size, "", true);
+        auto* tok_ptr = m->get_tokenizer();
+
         std::string chat_prompt = "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n";
-        auto chat_tokens = tokenizer->encode(chat_prompt);
+        auto chat_tokens = tok_ptr->encode(chat_prompt);
         std::cout << "  Chat tokens (" << chat_tokens.size() << "): [";
         for (size_t i = 0; i < std::min(chat_tokens.size(), (size_t)10); i++) {
             if (i > 0) std::cout << ", ";
@@ -218,9 +231,6 @@ int main(int argc, char* argv[]) {
         }
         if (chat_tokens.size() > 10) std::cout << ", ...";
         std::cout << "]\n";
-
-        auto m = create_model(model_path);
-        m->init(model_path, context_size, "", true);
 
         if (chat_tokens.size() > 1) {
             std::vector<uint32_t> prefill_toks(chat_tokens.begin(), chat_tokens.end() - 1);
@@ -233,7 +243,7 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < 20; i++) {
             tok = m->decode({tok}, 0.0f, 1.0f, 1);
             chat_generated.push_back(tok);
-            std::cout << tokenizer->decode({tok});
+            std::cout << tok_ptr->decode({tok});
             std::cout.flush();
             if (tok == 151643 || tok == 151645) break;
         }
@@ -246,9 +256,13 @@ int main(int argc, char* argv[]) {
     }
 
     // ========================================================
-    // Step 5: Full generation (reuses the smoke-test model)
+    // Step 5: Full generation (fresh model)
     // ========================================================
     std::cout << "[5/7] Running forward pass (prefill + decode)...\n";
+    auto model = create_model(model_path);
+    model->init(model_path, context_size, "", true);
+    auto* tokenizer = model->get_tokenizer();
+
     auto t4 = std::chrono::steady_clock::now();
 
     if (tokens.size() > 1) {

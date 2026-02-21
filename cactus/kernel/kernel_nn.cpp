@@ -9,6 +9,14 @@
 #include <random>
 #include <iostream>
 
+static std::vector<uint32_t> g_sample_token_history;
+static const size_t SAMPLE_MAX_HISTORY = 128;
+static const float SAMPLE_REPETITION_PENALTY = 1.1f;
+
+void clear_sample_history() {
+    g_sample_token_history.clear();
+}
+
 void cactus_relu_f16(const __fp16* input, __fp16* output, size_t num_elements) {
     for (size_t i = 0; i < num_elements; ++i) {
         __fp16 x = input[i];
@@ -559,15 +567,11 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
         std::memcpy(filtered_logits.data(), logits, vocab_size * sizeof(__fp16));
     }
 
-    static std::vector<uint32_t> token_history;
-    static const size_t MAX_HISTORY = 128; 
-    static const float REPETITION_PENALTY = 1.1f;
+    if (!g_sample_token_history.empty() && SAMPLE_REPETITION_PENALTY != 1.0f) {
+        const __fp16 penalty_inv = static_cast<__fp16>(1.0f / SAMPLE_REPETITION_PENALTY);
+        const __fp16 penalty = static_cast<__fp16>(SAMPLE_REPETITION_PENALTY);
 
-    if (!token_history.empty() && REPETITION_PENALTY != 1.0f) {
-        const __fp16 penalty_inv = static_cast<__fp16>(1.0f / REPETITION_PENALTY);
-        const __fp16 penalty = static_cast<__fp16>(REPETITION_PENALTY);
-
-        for (uint32_t prev_token : token_history) {
+        for (uint32_t prev_token : g_sample_token_history) {
             if (prev_token < vocab_size) {
                 filtered_logits[prev_token] = (filtered_logits[prev_token] > static_cast<__fp16>(0))
                     ? static_cast<__fp16>(filtered_logits[prev_token] * penalty_inv)
@@ -688,9 +692,9 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
         cumulative += probs[i];
         if (cumulative >= sample) {
             output[0] = static_cast<uint32_t>(i);
-            token_history.push_back(output[0]);
-            if (token_history.size() > MAX_HISTORY) {
-                token_history.erase(token_history.begin());
+            g_sample_token_history.push_back(output[0]);
+            if (g_sample_token_history.size() > SAMPLE_MAX_HISTORY) {
+                g_sample_token_history.erase(g_sample_token_history.begin());
             }
             return;
         }
@@ -699,17 +703,17 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
     for (size_t i = vocab_size; i > 0; --i) {
         if (probs[i-1] > 0.0f) {
             output[0] = static_cast<uint32_t>(i-1);
-            token_history.push_back(output[0]);
-            if (token_history.size() > MAX_HISTORY) {
-                token_history.erase(token_history.begin());
+            g_sample_token_history.push_back(output[0]);
+            if (g_sample_token_history.size() > SAMPLE_MAX_HISTORY) {
+                g_sample_token_history.erase(g_sample_token_history.begin());
             }
             return;
         }
     }
 
     output[0] = 0;
-    token_history.push_back(output[0]);
-    if (token_history.size() > MAX_HISTORY) {
-        token_history.erase(token_history.begin());
+    g_sample_token_history.push_back(output[0]);
+    if (g_sample_token_history.size() > SAMPLE_MAX_HISTORY) {
+        g_sample_token_history.erase(g_sample_token_history.begin());
     }
 }
