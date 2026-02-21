@@ -128,7 +128,7 @@ bool Model::init_internal(CactusGraph* gb, const std::string& model_folder, size
         attention_scale_ = 1.0f / std::sqrt(static_cast<float>(config_.attention_head_dim));
     }
 
-    Precision cache_precision = (config_.model_type == Config::ModelType::WHISPER || config_.model_type == Config::ModelType::MOONSHINE)
+    Precision cache_precision = (config_.model_type == Config::ModelType::WHISPER || config_.model_type == Config::ModelType::MOONSHINE || config_.model_type == Config::ModelType::QWEN_MOE)
                                ? Precision::FP16
                                : Precision::INT8;
     kv_cache_.init(config_.num_layers, context_size, config_.attention_kv_heads, config_.attention_head_dim, cache_precision);

@@ -89,26 +89,33 @@ size_t Qwen3MoeModel::build_attention(CactusGraph* gb, size_t normalized_input, 
     }
 
     size_t attn_output_4d;
-
-    // Store only NEW K/V for cache (matching QwenModel INT8 pattern)
-    if (use_cache) {
-        cache_k_output_nodes_[layer_idx] = k_proj_4d;
-        cache_v_output_nodes_[layer_idx] = v_proj_4d;
-    }
+    size_t final_k = k_proj_4d;
+    size_t final_v = v_proj_4d;
 
     if (use_cache && !kv_cache_.is_empty()) {
-        attn_output_4d = gb->attention_int8_hybrid(
-            q_proj_4d, k_proj_4d, v_proj_4d,
-            attention_scale_, position_offset,
-            kv_cache_.get_keys_int8(layer_idx),
-            kv_cache_.get_values_int8(layer_idx),
-            kv_cache_.get_key_scales(layer_idx),
-            kv_cache_.get_value_scales(layer_idx),
-            kv_cache_.current_seq_len, num_kv_heads, head_dim
-        );
-    } else {
-        attn_output_4d = gb->attention(q_proj_4d, k_proj_4d, v_proj_4d, attention_scale_, position_offset);
+        auto k_view = kv_cache_.get_key_view(layer_idx);
+        auto v_view = kv_cache_.get_value_view(layer_idx);
+
+        size_t cache_len = kv_cache_.current_seq_len;
+
+        size_t cache_k_node = gb->input(
+            {1, cache_len, num_kv_heads, head_dim}, kv_cache_.precision);
+        size_t cache_v_node = gb->input(
+            {1, cache_len, num_kv_heads, head_dim}, kv_cache_.precision);
+
+        gb->set_external_input(cache_k_node, const_cast<void*>(k_view.ptr1), kv_cache_.precision);
+        gb->set_external_input(cache_v_node, const_cast<void*>(v_view.ptr1), kv_cache_.precision);
+
+        final_k = gb->concat(cache_k_node, k_proj_4d, 1);
+        final_v = gb->concat(cache_v_node, v_proj_4d, 1);
     }
+
+    if (use_cache) {
+        cache_k_output_nodes_[layer_idx] = final_k;
+        cache_v_output_nodes_[layer_idx] = final_v;
+    }
+
+    attn_output_4d = gb->attention(q_proj_4d, final_k, final_v, attention_scale_, position_offset);
 
     auto attn_output = gb->reshape(attn_output_4d, {seq_len, config_.attention_head_dim * config_.attention_heads});
     return gb->matmul(attn_output, layer.attn_output_weight, true, backend);
@@ -123,7 +130,6 @@ size_t Qwen3MoeModel::build_mlp(CactusGraph* gb, size_t normalized_h, uint32_t l
     auto router_logits = gb->matmul(normalized_h, layer.moe_router_weight, true, backend);
 
     // HF Qwen3MoeSparseMoeBlock: softmax(all_logits) -> topk -> route
-    // This matches the HF reference outputs used for validation.
     auto router_probs = gb->softmax(router_logits);
     auto topk_result = gb->topk(router_probs, config_.num_top_experts);
     auto topk_idx = gb->index(topk_result, 0, 0);
@@ -207,70 +213,10 @@ size_t Qwen3MoeModel::forward(const std::vector<uint32_t>& tokens, bool use_cach
 
 uint32_t Qwen3MoeModel::decode(const std::vector<uint32_t>& tokens, float temperature, float top_p,
                                 size_t top_k, const std::string& profile_file, float* out_entropy) {
-    if (kv_cache_.is_empty() && !tokens.empty()) {
-        if (tokens.size() > 1) {
-            std::vector<uint32_t> prefix(tokens.begin(), tokens.end() - 1);
-            Model::prefill(prefix, prefix.size(), profile_file);
-            return Model::decode({tokens.back()}, temperature, top_p, top_k, profile_file, out_entropy);
-        }
-
-        // Single token from empty cache: Model::decode corrupts KV cache state
-        // in a way that subsequent decodes produce wrong results. Work around
-        // by using prefill for cache population (known correct), then computing
-        // logits via a separate forward(false) pass that doesn't touch the cache.
-        if (temperature < 0) temperature = config_.default_temperature;
-        if (top_p < 0) top_p = config_.default_top_p;
-        if (top_k == 0) top_k = config_.default_top_k;
-
-        Model::prefill(tokens, tokens.size(), profile_file);
-
-        auto* gb = static_cast<CactusGraph*>(graph_handle_);
-        auto backend = config_.default_backend == Config::Backend::CPU
-            ? ComputeBackend::CPU
-            : ComputeBackend::NPU;
-
-        auto final_hidden = forward(tokens, false);
-        auto last_hidden = gb->index(final_hidden, tokens.size() - 1, 0);
-        size_t hidden_dim = gb->get_output_buffer(last_hidden).shape[0];
-        last_hidden = gb->reshape(last_hidden, {1, hidden_dim});
-        auto logits_node = gb->matmul(last_hidden, output_weight_node_id_, true, backend);
-        auto sample_node = gb->sample(logits_node, temperature, top_p, top_k,
-                                      tool_constrainer_.get_bias());
-        gb->execute(profile_file);
-
-        uint32_t result_token = *static_cast<uint32_t*>(gb->get_output(sample_node));
-
-        if (out_entropy) {
-            const auto& logits_buf = gb->get_output_buffer(logits_node);
-            void* logits_ptr = gb->get_output(logits_node);
-            size_t vocab_size = logits_buf.shape.back();
-
-            std::vector<float> logits(vocab_size);
-            if (logits_buf.precision == Precision::FP32) {
-                std::copy(static_cast<float*>(logits_ptr),
-                         static_cast<float*>(logits_ptr) + vocab_size, logits.begin());
-            } else if (logits_buf.precision == Precision::FP16) {
-                Quantization::fp16_to_fp32(static_cast<__fp16*>(logits_ptr), logits.data(), vocab_size);
-            } else {
-                Quantization::int8_to_fp32(static_cast<int8_t*>(logits_ptr), logits.data(), vocab_size, 1.0f);
-            }
-
-            float max_logit = *std::max_element(logits.begin(), logits.end());
-            double sum_exp = 0.0;
-            for (size_t i = 0; i < vocab_size; ++i)
-                sum_exp += std::exp(static_cast<double>(logits[i] - max_logit));
-            double log_sum_exp = static_cast<double>(max_logit) + std::log(sum_exp);
-
-            double entropy = 0.0;
-            for (size_t i = 0; i < vocab_size; ++i) {
-                double log_prob = static_cast<double>(logits[i]) - log_sum_exp;
-                double prob = std::exp(log_prob);
-                if (prob > 1e-10) entropy -= prob * log_prob;
-            }
-            *out_entropy = static_cast<float>(entropy / std::log(static_cast<double>(vocab_size)));
-        }
-
-        return result_token;
+    if (kv_cache_.is_empty() && !tokens.empty() && tokens.size() > 1) {
+        std::vector<uint32_t> prefix(tokens.begin(), tokens.end() - 1);
+        Model::prefill(prefix, prefix.size(), profile_file);
+        return Model::decode({tokens.back()}, temperature, top_p, top_k, profile_file, out_entropy);
     }
 
     return Model::decode(tokens, temperature, top_p, top_k, profile_file, out_entropy);

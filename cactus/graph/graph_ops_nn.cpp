@@ -260,18 +260,38 @@ void compute_softmax_node(GraphNode& node, const std::vector<std::unique_ptr<Gra
                                 std::to_string(shape.size()) + "D tensor");
     }
 
-    if (input_buffer.precision != Precision::FP16) {
-        throw std::runtime_error("Softmax operation only supports FP16 precision");
-    }
-
     size_t batch_size = 1;
     for (size_t i = 0; i < shape.size() - 1; i++) {
         batch_size *= shape[i];
     }
     size_t vocab_size = shape[shape.size() - 1];
 
-    cactus_softmax_f16(input_buffer.data_as<__fp16>(), node.output_buffer.data_as<__fp16>(),
-                      batch_size, 1, vocab_size);
+    if (input_buffer.precision == Precision::FP32) {
+        const float* input = input_buffer.data_as<float>();
+        float* output = node.output_buffer.data_as<float>();
+        for (size_t b = 0; b < batch_size; ++b) {
+            const float* row = input + b * vocab_size;
+            float* out_row = output + b * vocab_size;
+            float max_val = row[0];
+            for (size_t i = 1; i < vocab_size; ++i) {
+                if (row[i] > max_val) max_val = row[i];
+            }
+            float sum = 0.0f;
+            for (size_t i = 0; i < vocab_size; ++i) {
+                out_row[i] = expf(row[i] - max_val);
+                sum += out_row[i];
+            }
+            float inv_sum = 1.0f / sum;
+            for (size_t i = 0; i < vocab_size; ++i) {
+                out_row[i] *= inv_sum;
+            }
+        }
+    } else if (input_buffer.precision == Precision::FP16) {
+        cactus_softmax_f16(input_buffer.data_as<__fp16>(), node.output_buffer.data_as<__fp16>(),
+                          batch_size, 1, vocab_size);
+    } else {
+        throw std::runtime_error("Softmax operation only supports FP16 and FP32 precision");
+    }
 }
 
 void compute_attention_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map) {

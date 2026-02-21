@@ -520,18 +520,35 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
                        const float* bias_values, const uint32_t* bias_indices,
                        size_t bias_count) {
 
-    if (temperature == 0.0f && top_p <= 0.0f && top_k == 0) {
+    if (temperature == 0.0f) {
         if (vocab_size == 0) {
             output[0] = 0;
             return;
         }
         size_t best_idx = 0;
         float best_val = static_cast<float>(logits[0]);
-        for (size_t i = 1; i < vocab_size; ++i) {
-            float val = static_cast<float>(logits[i]);
-            if (val > best_val) {
-                best_val = val;
-                best_idx = i;
+        if (bias_values && bias_indices && bias_count > 0) {
+            std::vector<float> biased_logits(vocab_size);
+            for (size_t i = 0; i < vocab_size; ++i)
+                biased_logits[i] = static_cast<float>(logits[i]);
+            for (size_t i = 0; i < bias_count; ++i) {
+                if (bias_indices[i] < vocab_size)
+                    biased_logits[bias_indices[i]] += bias_values[i];
+            }
+            best_val = biased_logits[0];
+            for (size_t i = 1; i < vocab_size; ++i) {
+                if (biased_logits[i] > best_val) {
+                    best_val = biased_logits[i];
+                    best_idx = i;
+                }
+            }
+        } else {
+            for (size_t i = 1; i < vocab_size; ++i) {
+                float val = static_cast<float>(logits[i]);
+                if (val > best_val) {
+                    best_val = val;
+                    best_idx = i;
+                }
             }
         }
         output[0] = static_cast<uint32_t>(best_idx);
