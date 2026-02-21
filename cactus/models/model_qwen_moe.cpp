@@ -128,8 +128,6 @@ size_t Qwen3MoeModel::build_mlp(CactusGraph* gb, size_t normalized_h, uint32_t l
     const size_t seq_len = gb->get_output_buffer(normalized_h).shape[0];
 
     auto router_logits = gb->matmul(normalized_h, layer.moe_router_weight, true, backend);
-
-    // HF Qwen3MoeSparseMoeBlock: softmax(all_logits) -> topk -> route
     auto router_probs = gb->softmax(router_logits);
     auto topk_result = gb->topk(router_probs, config_.num_top_experts);
     auto topk_idx = gb->index(topk_result, 0, 0);
