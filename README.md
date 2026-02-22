@@ -136,7 +136,14 @@ graph.hard_reset();
 | openai/whisper-medium | transcribe, speech embed, Apple NPU |
 | snakers4/silero-vad | vad |
 | nomic-ai/nomic-embed-text-v2-moe | embed |                                                                                                                    
-| Qwen/Qwen3-Embedding-0.6B | embed | 
+| Qwen/Qwen3-Embedding-0.6B | embed |
+| kshitijthakkar/loggenix-moe-0.12B-A0.08B-e5-lr5e4-b4-3060 | completion, tools |
+| kshitijthakkar/loggenix-moe-0.3B-A0.1B-e3-lr7e5-b16-4090-v5.1-finetuned | completion, tools |
+| kshitijthakkar/loggenix-moe-0.3B-A0.1B-e3-lr7e5-b16-4090-v6.3-finetuned-tool | completion, tools |
+| kshitijthakkar/loggenix-moe-0.4B-0.2A-sft-s3.1 | completion, tools |
+| kshitijthakkar/loggenix-moe-0.6B-base | completion, tools |
+| kshitijthakkar/loggenix-moe-1.3B-base | completion, tools |
+| kshitijthakkar/loggenix-moe-2.5B-base | completion, tools |
 
 ## Using this repo on Mac
 ```bash
