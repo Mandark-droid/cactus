@@ -145,6 +145,7 @@ def get_layer_weight_patterns(i, precision, model_type=None):
         (['mlp.experts.mlp.w1'], precision, f'layer_{i}_mlp_expert_{{channel}}.mlp1.weights', False),
         (['mlp.experts.mlp.w2'], precision, f'layer_{i}_mlp_expert_{{channel}}.mlp2.weights', True),
         (['mlp.router.layer.weight'], precision, f'layer_{i}_mlp_router.layer.weights', False),
+        (['mlp.gate.weight'], precision, f'layer_{i}_moe_router.weights', False),
         (['encoder_attn.q_proj.weight', 'attention.to_q.weight'], precision, f'layer_{i}_encoder_attn_q.weights', False),
         (['encoder_attn.k_proj.weight', 'attention.to_k.weight'], precision, f'layer_{i}_encoder_attn_k.weights', False),
         (['encoder_attn.v_proj.weight', 'attention.to_v.weight'], precision, f'layer_{i}_encoder_attn_v.weights', False),

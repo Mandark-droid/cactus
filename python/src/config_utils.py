@@ -59,6 +59,8 @@ def detect_model_type(cfg, config, output_dir=None):
         return 'gemma'
     elif 'lfm2' in model_type_str:
         return 'lfm2'
+    elif 'qwen3_moe' in model_type_str:
+        return 'qwen3_moe'
     elif 'qwen' in model_type_str:
         return 'qwen'
     elif 'moonshine' in model_type_str:
@@ -105,6 +107,8 @@ def extract_base_config(cfg, config):
         'num_top_experts': num_experts_per_tok,
         'num_experts_per_tok': num_experts_per_tok,
         'moe_every_n_layers': cfg_get(cfg, 'moe_every_n_layers', 0),
+        'moe_intermediate_size': cfg_get(cfg, 'moe_intermediate_size', cfg_get(cfg, 'expert_intermediate_size', 0)),
+        'norm_topk_prob': cfg_get(cfg, 'norm_topk_prob', False),
     }
 
 

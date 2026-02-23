@@ -53,6 +53,53 @@ private:
 };
 
 
+class Qwen3MoeModel : public Model {
+public:
+    Qwen3MoeModel();
+    explicit Qwen3MoeModel(const Config& config);
+    ~Qwen3MoeModel() override = default;
+
+protected:
+    size_t build_attention(CactusGraph* gb, size_t normalized_input, uint32_t layer_idx,
+                          ComputeBackend backend, bool use_cache = false, size_t position_offset = 0) override;
+
+    size_t build_mlp(CactusGraph* gb, size_t normalized_h, uint32_t layer_idx,
+                    ComputeBackend backend) const override;
+
+    size_t build_transformer_block(CactusGraph* gb, size_t hidden, uint32_t layer_idx,
+                                  ComputeBackend backend, bool use_cache = false, size_t position_offset = 0) override;
+
+    size_t forward(const std::vector<uint32_t>& tokens, bool use_cache = false) override;
+    void load_weights_to_graph(CactusGraph* gb) override;
+
+private:
+    struct WeightNodeIDs {
+        size_t output_weight;
+        size_t output_norm_weight;
+
+        struct ExpertWeights {
+            size_t w1_weight = 0;
+            size_t w3_weight = 0;
+            size_t w2_weight = 0;
+        };
+
+        struct LayerWeights {
+            size_t attn_q_weight = 0;
+            size_t attn_k_weight = 0;
+            size_t attn_v_weight = 0;
+            size_t attn_output_weight = 0;
+            size_t input_layernorm_weight = 0;
+            size_t attn_q_norm_weight = 0;
+            size_t attn_k_norm_weight = 0;
+            size_t post_attention_layernorm_weight = 0;
+            size_t moe_router_weight = 0;
+            std::vector<ExpertWeights> moe_experts;
+        };
+
+        std::vector<LayerWeights> layers;
+    } weight_nodes_;
+};
+
 
 class GemmaModel : public Model {
 public:

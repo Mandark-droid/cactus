@@ -411,10 +411,10 @@ bool Config::from_json(const std::string& config_path) {
         std::string key = line.substr(0, eq_pos);
         std::string value = line.substr(eq_pos + 1);
         
-        key.erase(0, key.find_first_not_of(" \t"));
-        key.erase(key.find_last_not_of(" \t") + 1);
-        value.erase(0, value.find_first_not_of(" \t"));
-        value.erase(value.find_last_not_of(" \t") + 1);
+        key.erase(0, key.find_first_not_of(" \t\r\n"));
+        key.erase(key.find_last_not_of(" \t\r\n") + 1);
+        value.erase(0, value.find_first_not_of(" \t\r\n"));
+        value.erase(value.find_last_not_of(" \t\r\n") + 1);
         
         if (key == "vocab_size") vocab_size = static_cast<uint32_t>(std::stoul(value));
         else if (key == "bos_token_id") bos_token_id = static_cast<uint32_t>(std::stoul(value));
@@ -477,6 +477,7 @@ bool Config::from_json(const std::string& config_path) {
             else if (value == "whisper" || value == "WHISPER") model_type = ModelType::WHISPER;
             else if (value == "moonshine" || value == "MOONSHINE") model_type = ModelType::MOONSHINE;
             else if (value == "silero_vad" || value == "SILERO_VAD") model_type = ModelType::SILERO_VAD;
+            else if (value == "qwen3_moe" || value == "QWEN3_MOE") model_type = ModelType::QWEN;
             else model_type = ModelType::QWEN;
         }
         else if (key == "model_variant") {
@@ -574,6 +575,9 @@ std::unique_ptr<Model> create_model(const std::string& model_folder) {
 
     switch (config.model_type) {
         case Config::ModelType::QWEN:
+            if (config.num_experts > 0 && config.moe_intermediate_dim > 0 && config.num_experts_per_tok > 0) {
+                return std::make_unique<Qwen3MoeModel>(config);
+            }
             return std::make_unique<QwenModel>(config);
         case Config::ModelType::GEMMA:
             return std::make_unique<GemmaModel>(config);

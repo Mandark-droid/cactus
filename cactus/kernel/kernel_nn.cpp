@@ -9,6 +9,14 @@
 #include <random>
 #include <iostream>
 
+static std::vector<uint32_t> g_sample_token_history;
+static const size_t SAMPLE_MAX_HISTORY = 128;
+static const float SAMPLE_REPETITION_PENALTY = 1.1f;
+
+void clear_sample_history() {
+    g_sample_token_history.clear();
+}
+
 void cactus_relu_f16(const __fp16* input, __fp16* output, size_t num_elements) {
     for (size_t i = 0; i < num_elements; ++i) {
         __fp16 x = input[i];
@@ -512,18 +520,35 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
                        const float* bias_values, const uint32_t* bias_indices,
                        size_t bias_count) {
 
-    if (temperature == 0.0f && top_p <= 0.0f && top_k == 0) {
+    if (temperature == 0.0f) {
         if (vocab_size == 0) {
             output[0] = 0;
             return;
         }
         size_t best_idx = 0;
         float best_val = static_cast<float>(logits[0]);
-        for (size_t i = 1; i < vocab_size; ++i) {
-            float val = static_cast<float>(logits[i]);
-            if (val > best_val) {
-                best_val = val;
-                best_idx = i;
+        if (bias_values && bias_indices && bias_count > 0) {
+            std::vector<float> biased_logits(vocab_size);
+            for (size_t i = 0; i < vocab_size; ++i)
+                biased_logits[i] = static_cast<float>(logits[i]);
+            for (size_t i = 0; i < bias_count; ++i) {
+                if (bias_indices[i] < vocab_size)
+                    biased_logits[bias_indices[i]] += bias_values[i];
+            }
+            best_val = biased_logits[0];
+            for (size_t i = 1; i < vocab_size; ++i) {
+                if (biased_logits[i] > best_val) {
+                    best_val = biased_logits[i];
+                    best_idx = i;
+                }
+            }
+        } else {
+            for (size_t i = 1; i < vocab_size; ++i) {
+                float val = static_cast<float>(logits[i]);
+                if (val > best_val) {
+                    best_val = val;
+                    best_idx = i;
+                }
             }
         }
         output[0] = static_cast<uint32_t>(best_idx);
@@ -559,15 +584,11 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
         std::memcpy(filtered_logits.data(), logits, vocab_size * sizeof(__fp16));
     }
 
-    static std::vector<uint32_t> token_history;
-    static const size_t MAX_HISTORY = 128; 
-    static const float REPETITION_PENALTY = 1.1f;
+    if (!g_sample_token_history.empty() && SAMPLE_REPETITION_PENALTY != 1.0f) {
+        const __fp16 penalty_inv = static_cast<__fp16>(1.0f / SAMPLE_REPETITION_PENALTY);
+        const __fp16 penalty = static_cast<__fp16>(SAMPLE_REPETITION_PENALTY);
 
-    if (!token_history.empty() && REPETITION_PENALTY != 1.0f) {
-        const __fp16 penalty_inv = static_cast<__fp16>(1.0f / REPETITION_PENALTY);
-        const __fp16 penalty = static_cast<__fp16>(REPETITION_PENALTY);
-
-        for (uint32_t prev_token : token_history) {
+        for (uint32_t prev_token : g_sample_token_history) {
             if (prev_token < vocab_size) {
                 filtered_logits[prev_token] = (filtered_logits[prev_token] > static_cast<__fp16>(0))
                     ? static_cast<__fp16>(filtered_logits[prev_token] * penalty_inv)
@@ -688,9 +709,9 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
         cumulative += probs[i];
         if (cumulative >= sample) {
             output[0] = static_cast<uint32_t>(i);
-            token_history.push_back(output[0]);
-            if (token_history.size() > MAX_HISTORY) {
-                token_history.erase(token_history.begin());
+            g_sample_token_history.push_back(output[0]);
+            if (g_sample_token_history.size() > SAMPLE_MAX_HISTORY) {
+                g_sample_token_history.erase(g_sample_token_history.begin());
             }
             return;
         }
@@ -699,17 +720,17 @@ void cactus_sample_f16(const __fp16* logits, uint32_t* output, size_t vocab_size
     for (size_t i = vocab_size; i > 0; --i) {
         if (probs[i-1] > 0.0f) {
             output[0] = static_cast<uint32_t>(i-1);
-            token_history.push_back(output[0]);
-            if (token_history.size() > MAX_HISTORY) {
-                token_history.erase(token_history.begin());
+            g_sample_token_history.push_back(output[0]);
+            if (g_sample_token_history.size() > SAMPLE_MAX_HISTORY) {
+                g_sample_token_history.erase(g_sample_token_history.begin());
             }
             return;
         }
     }
 
     output[0] = 0;
-    token_history.push_back(output[0]);
-    if (token_history.size() > MAX_HISTORY) {
-        token_history.erase(token_history.begin());
+    g_sample_token_history.push_back(output[0]);
+    if (g_sample_token_history.size() > SAMPLE_MAX_HISTORY) {
+        g_sample_token_history.erase(g_sample_token_history.begin());
     }
 }

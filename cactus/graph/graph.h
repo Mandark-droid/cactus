@@ -406,6 +406,7 @@ namespace ValidationUtils {
 class CactusGraph {
 public:
     CactusGraph();
+    ~CactusGraph();
 
     struct DebugNodeEntry {
         uint32_t layer_idx;

@@ -234,7 +234,13 @@ namespace ValidationUtils {
     }
 }
 
+extern void clear_sample_history();
+
 CactusGraph::CactusGraph() : next_node_id_(0) {}
+
+CactusGraph::~CactusGraph() {
+    clear_sample_history();
+}
 
 size_t CactusGraph::get_node_count() const {
     return nodes_.size();
